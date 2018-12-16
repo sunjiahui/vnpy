@@ -13,6 +13,8 @@ from itertools import product
 import multiprocessing
 import copy
 
+import pytz
+import dateutil.parser as dateparser
 import pymongo
 import numpy as np
 import matplotlib.pyplot as plt
@@ -125,10 +127,11 @@ class BacktestingEngine(object):
     #----------------------------------------------------------------------
     def setStartDate(self, startDate='20100416', initDays=10):
         """设置回测的启动日期"""
+        # TODO change datetime
         self.startDate = startDate
         self.initDays = initDays
         
-        self.dataStartDate = datetime.strptime(startDate, '%Y%m%d')
+        self.dataStartDate = dateparser.parse(startDate)
         
         initTimeDelta = timedelta(initDays)
         self.strategyStartDate = self.dataStartDate + initTimeDelta
@@ -139,7 +142,7 @@ class BacktestingEngine(object):
         self.endDate = endDate
         
         if endDate:
-            self.dataEndDate = datetime.strptime(endDate, '%Y%m%d')
+            self.dataEndDate = dateparser.parse(endDate)
             
             # 若不修改时间则会导致不包含dataEndDate当天数据
             self.dataEndDate = self.dataEndDate.replace(hour=23, minute=59)    
@@ -279,10 +282,13 @@ class BacktestingEngine(object):
             func(data)     
             
         self.output(u'数据回放结束')
+        self.strategy.onStop()
         
     #----------------------------------------------------------------------
     def newBar(self, bar):
         """新的K线"""
+        if bar.datetime.tzinfo is None:
+            bar.datetime = bar.datetime.replace(tzinfo=pytz.utc)
         self.bar = bar
         self.dt = bar.datetime
         
@@ -295,6 +301,8 @@ class BacktestingEngine(object):
     #----------------------------------------------------------------------
     def newTick(self, tick):
         """新的Tick"""
+        if tick.datetime.tzinfo is None:
+            tick.datetime = tick.datetime.replace(pytz.utc)
         self.tick = tick
         self.dt = tick.datetime
         
@@ -322,11 +330,13 @@ class BacktestingEngine(object):
             sellCrossPrice = self.bar.high      # 若卖出方向限价单价格低于该价格，则会成交
             buyBestCrossPrice = self.bar.open   # 在当前时间点前发出的买入委托可能的最优成交价
             sellBestCrossPrice = self.bar.open  # 在当前时间点前发出的卖出委托可能的最优成交价
+            vtSymbol = self.bar.vtSymbol
         else:
             buyCrossPrice = self.tick.askPrice1
             sellCrossPrice = self.tick.bidPrice1
             buyBestCrossPrice = self.tick.askPrice1
             sellBestCrossPrice = self.tick.bidPrice1
+            vtSymbol = self.tick.vtSymbol
         
         # 遍历限价单字典中的所有限价单
         for orderID, order in list(self.workingLimitOrderDict.items()):
@@ -334,6 +344,9 @@ class BacktestingEngine(object):
             if not order.status:
                 order.status = STATUS_NOTTRADED
                 self.strategy.onOrder(order)
+
+            if order.vtSymbol != vtSymbol:
+                continue
 
             # 判断是否会成交
             buyCross = (order.direction==DIRECTION_LONG and 
@@ -370,7 +383,7 @@ class BacktestingEngine(object):
                     self.strategy.pos -= order.totalVolume
                 
                 trade.volume = order.totalVolume
-                trade.tradeTime = self.dt.strftime('%H:%M:%S')
+                trade.tradeTime = self.dt.isoformat()
                 trade.dt = self.dt
                 self.strategy.onTrade(trade)
                 
@@ -393,13 +406,17 @@ class BacktestingEngine(object):
             buyCrossPrice = self.bar.high    # 若买入方向停止单价格低于该价格，则会成交
             sellCrossPrice = self.bar.low    # 若卖出方向限价单价格高于该价格，则会成交
             bestCrossPrice = self.bar.open   # 最优成交价，买入停止单不能低于，卖出停止单不能高于
+            vtSymbol = self.bar.vtSymbol
         else:
             buyCrossPrice = self.tick.lastPrice
             sellCrossPrice = self.tick.lastPrice
             bestCrossPrice = self.tick.lastPrice
+            vtSymbol = self.tick.vtSymbol
         
         # 遍历停止单字典中的所有停止单
         for stopOrderID, so in list(self.workingStopOrderDict.items()):
+            if vtSymbol != so.vtSymbol:
+                continue
             # 判断是否会成交
             buyCross = so.direction==DIRECTION_LONG and so.price<=buyCrossPrice
             sellCross = so.direction==DIRECTION_SHORT and so.price>=sellCrossPrice
@@ -433,7 +450,7 @@ class BacktestingEngine(object):
                 trade.direction = so.direction
                 trade.offset = so.offset
                 trade.volume = so.volume
-                trade.tradeTime = self.dt.strftime('%H:%M:%S')
+                trade.tradeTime = self.dt.isoformat()
                 trade.dt = self.dt
                 
                 self.tradeDict[tradeID] = trade
@@ -475,7 +492,7 @@ class BacktestingEngine(object):
         order.totalVolume = volume
         order.orderID = orderID
         order.vtOrderID = orderID
-        order.orderTime = self.dt.strftime('%H:%M:%S')
+        order.orderTime = self.dt.isoformat()
         
         # CTA委托类型映射
         if orderType == CTAORDER_BUY:
@@ -504,7 +521,7 @@ class BacktestingEngine(object):
             order = self.workingLimitOrderDict[vtOrderID]
             
             order.status = STATUS_CANCELLED
-            order.cancelTime = self.dt.strftime('%H:%M:%S')
+            order.cancelTime = self.dt.isoformat()
             
             self.strategy.onOrder(order)
             
@@ -825,6 +842,7 @@ class BacktestingEngine(object):
     def showBacktestingResult(self):
         """显示回测结果"""
         d = self.calculateBacktestingResult()
+        self.backtestingResult = d
         
         # 输出
         self.output('-' * 30)
@@ -863,7 +881,7 @@ class BacktestingEngine(object):
         pPos.set_ylabel("Position")
         if d['posList'][-1] == 0:
             del d['posList'][-1]
-        tradeTimeIndex = [item.strftime("%m/%d %H:%M:%S") for item in d['tradeTimeList']]
+        tradeTimeIndex = [item.isoformat() for item in d['tradeTimeList']]
         xindex = np.arange(0, len(tradeTimeIndex), np.int(len(tradeTimeIndex)/10))
         tradeTimeIndex = list(map(lambda i: tradeTimeIndex[i], xindex))
         pPos.plot(d['posList'], color='k', drawstyle='steps-pre')
